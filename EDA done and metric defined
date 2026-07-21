@@ -1,0 +1,653 @@
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "id": "7b0ad21a",
+   "metadata": {
+    "_cell_guid": "b1076dfc-b9ad-4769-8c92-a6c4dae69d19",
+    "_uuid": "8f2839f25d086af736a60e9eeb907d3b93b6e0e5",
+    "execution": {
+     "iopub.execute_input": "2026-07-21T17:10:07.238687Z",
+     "iopub.status.busy": "2026-07-21T17:10:07.238198Z",
+     "iopub.status.idle": "2026-07-21T17:10:09.145371Z",
+     "shell.execute_reply": "2026-07-21T17:10:09.144448Z"
+    },
+    "papermill": {
+     "duration": 1.912917,
+     "end_time": "2026-07-21T17:10:09.147504+00:00",
+     "exception": false,
+     "start_time": "2026-07-21T17:10:07.234587+00:00",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "/kaggle/input/competitions/smart-mcq-solver-challenge/sample_submission.csv\n",
+      "/kaggle/input/competitions/smart-mcq-solver-challenge/train.csv\n",
+      "/kaggle/input/competitions/smart-mcq-solver-challenge/test.csv\n"
+     ]
+    }
+   ],
+   "source": [
+    "# This Python 3 environment comes with many helpful analytics libraries installed\n",
+    "# It is defined by the kaggle/python Docker image: https://github.com/kaggle/docker-python\n",
+    "# For example, here's several helpful packages to load\n",
+    "\n",
+    "import numpy as np # linear algebra\n",
+    "import pandas as pd # data processing, CSV file I/O (e.g. pd.read_csv)\n",
+    "\n",
+    "# Input data files are available in the read-only \"../input/\" directory\n",
+    "# For example, running this (by clicking run or pressing Shift+Enter) will list all files under the input directory\n",
+    "\n",
+    "import os\n",
+    "for dirname, _, filenames in os.walk('/kaggle/input'):\n",
+    "    for filename in filenames:\n",
+    "        print(os.path.join(dirname, filename))\n",
+    "\n",
+    "# You can write up to 20GB to the current directory (/kaggle/working/) that gets preserved as output when you create a version using \"Save & Run All\" \n",
+    "# You can also write temporary files to /kaggle/temp/, but they won't be saved outside of the current session\n",
+    "\n",
+    "# Use the kagglehub client library to attach Kaggle resources like competitions, datasets, and models to your session\n",
+    "# Learn more about kagglehub: https://github.com/Kaggle/kagglehub/blob/main/README.md\n",
+    "\n",
+    "import kagglehub\n",
+    "# kagglehub.dataset_download('<owner>/<dataset-slug>')"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "id": "752cfd5e",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-07-21T17:10:09.156003Z",
+     "iopub.status.busy": "2026-07-21T17:10:09.155470Z",
+     "iopub.status.idle": "2026-07-21T17:10:09.160550Z",
+     "shell.execute_reply": "2026-07-21T17:10:09.159491Z"
+    },
+    "papermill": {
+     "duration": 0.012761,
+     "end_time": "2026-07-21T17:10:09.162904+00:00",
+     "exception": false,
+     "start_time": "2026-07-21T17:10:09.150143+00:00",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "# # sample  =  pd.read_csv('/kaggle/input/competitions/smart-mcq-solver-challenge/sample_submission.csv')\n",
+    "# # sample.to_csv('submission.csv', index=False)\n",
+    "# !pip uninstall -y transformers sentence-transformers"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "8ff7a6da",
+   "metadata": {
+    "papermill": {
+     "duration": 0.003128,
+     "end_time": "2026-07-21T17:10:09.169819+00:00",
+     "exception": false,
+     "start_time": "2026-07-21T17:10:09.166691+00:00",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "# Smart MCQ Solver Challenge — End-to-End Solution\n",
+    "### MAP@3 ranking of top-3 answers (A–E) for knowledge-based MCQs\n",
+    "\n",
+    "**Pipeline overview**\n",
+    "\n",
+    "| # | Model | Category | Idea |\n",
+    "|---|-------|----------|------|\n",
+    "| 1 | TF-IDF + PyTorch MLP | **Built from scratch** | No pretrained weights anywhere; learns purely from the ~2,000 training rows |\n",
+    "| 2 | DeBERTa-v3 (`AutoModelForMultipleChoice`) | **Pretrained, fine-tuned** | Transfer learning — pretrained language + world knowledge, adapted to this task |\n",
+    "| 3 | XGBoost on engineered similarity features (TF-IDF sim, Sentence-Transformer sim, lexical overlap, etc.) | **Additional model of choice** | Tree-based, feature-driven — a structurally different failure mode from 1 & 2 |\n",
+    "| — | Weighted ensemble of the three | **Final submission** | Combines probability outputs, tuned on a held-out validation split |\n",
+    "\n",
+    "**Notebook structure**\n",
+    "1. Setup & data loading\n",
+    "2. EDA (light)\n",
+    "3. MAP@3 metric implementation\n",
+    "4. Train/validation split\n",
+    "5. Model 1 — from-scratch TF-IDF + MLP\n",
+    "6. Model 2 — pretrained DeBERTa-v3 fine-tuned as multiple-choice classifier\n",
+    "7. Model 3 — XGBoost on engineered similarity features\n",
+    "8. Ensembling + local MAP@3 evaluation\n",
+    "9. Final inference on `test.csv` + submission file\n",
+    "10. (Optional, commented out) Zero-shot LLM prompting extension\n",
+    "\n",
+    "> Upload `train.csv`, `test.csv`, and `sample_submission.csv` to the Colab working directory (or mount Google Drive) before running.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "8359a1ad",
+   "metadata": {
+    "papermill": {
+     "duration": 0.002025,
+     "end_time": "2026-07-21T17:10:09.174003+00:00",
+     "exception": false,
+     "start_time": "2026-07-21T17:10:09.171978+00:00",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "##1. Setup"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "id": "a305abec",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-07-21T17:10:09.179329Z",
+     "iopub.status.busy": "2026-07-21T17:10:09.179012Z",
+     "iopub.status.idle": "2026-07-21T17:10:56.298636Z",
+     "shell.execute_reply": "2026-07-21T17:10:56.297622Z"
+    },
+    "papermill": {
+     "duration": 47.124315,
+     "end_time": "2026-07-21T17:10:56.300360+00:00",
+     "exception": false,
+     "start_time": "2026-07-21T17:10:09.176045+00:00",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "\u001b[2K     \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m43.8/43.8 kB\u001b[0m \u001b[31m2.0 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m9.1/9.1 MB\u001b[0m \u001b[31m82.3 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m547.8/547.8 kB\u001b[0m \u001b[31m6.3 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m309.4/309.4 kB\u001b[0m \u001b[31m20.1 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m251.6/251.6 kB\u001b[0m \u001b[31m16.1 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m116.3/116.3 kB\u001b[0m \u001b[31m8.3 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m316.1/316.1 kB\u001b[0m \u001b[31m20.7 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m566.4/566.4 kB\u001b[0m \u001b[31m35.2 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m3.6/3.6 MB\u001b[0m \u001b[31m72.0 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m12.2/12.2 MB\u001b[0m \u001b[31m76.5 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[?25h\u001b[31mERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.\r\n",
+      "bigframes 2.39.0 requires google-cloud-bigquery-storage<3.0.0,>=2.30.0, which is not installed.\r\n",
+      "tpot 1.1.0 requires dill>=0.3.9, but you have dill 0.3.8 which is incompatible.\r\n",
+      "dask-cuda 26.2.0 requires cuda-core==0.3.*, but you have cuda-core 1.0.1 which is incompatible.\r\n",
+      "dask-cuda 26.2.0 requires numba-cuda<0.23.0,>=0.22.1, but you have numba-cuda 0.30.2 which is incompatible.\r\n",
+      "distributed-ucxx-cu12 0.48.0 requires numba-cuda[cu12]<0.23.0,>=0.22.1, but you have numba-cuda 0.30.2 which is incompatible.\r\n",
+      "cuml-cu12 26.2.0 requires numba<0.62.0,>=0.60.0, but you have numba 0.65.1 which is incompatible.\r\n",
+      "cuml-cu12 26.2.0 requires numba-cuda[cu12]<0.23.0,>=0.22.1, but you have numba-cuda 0.30.2 which is incompatible.\r\n",
+      "ucxx-cu12 0.48.0 requires numba-cuda[cu12]<0.23.0,>=0.22.1, but you have numba-cuda 0.30.2 which is incompatible.\r\n",
+      "cudf-cu12 26.2.1 requires numba<0.62.0,>=0.60.0, but you have numba 0.65.1 which is incompatible.\r\n",
+      "cudf-cu12 26.2.1 requires numba-cuda[cu12]<0.23.0,>=0.22.2, but you have numba-cuda 0.30.2 which is incompatible.\r\n",
+      "gcsfs 2025.3.0 requires fsspec==2025.3.0, but you have fsspec 2024.5.0 which is incompatible.\u001b[0m\u001b[31m\r\n",
+      "\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m171.5/171.5 kB\u001b[0m \u001b[31m5.1 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m13.1/13.1 MB\u001b[0m \u001b[31m88.0 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m297.1/297.1 MB\u001b[0m \u001b[31m6.1 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[?25h\u001b[31mERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.\r\n",
+      "tpot 1.1.0 requires dill>=0.3.9, but you have dill 0.3.8 which is incompatible.\r\n",
+      "tpot 1.1.0 requires scikit-learn>=1.6, but you have scikit-learn 1.5.0 which is incompatible.\r\n",
+      "tpot 1.1.0 requires xgboost>=3.0.0, but you have xgboost 2.0.3 which is incompatible.\r\n",
+      "category-encoders 2.9.0 requires scikit-learn>=1.6.0, but you have scikit-learn 1.5.0 which is incompatible.\r\n",
+      "umap-learn 0.5.12 requires scikit-learn>=1.6, but you have scikit-learn 1.5.0 which is incompatible.\r\n",
+      "cuml-cu12 26.2.0 requires numba<0.62.0,>=0.60.0, but you have numba 0.65.1 which is incompatible.\r\n",
+      "cuml-cu12 26.2.0 requires numba-cuda[cu12]<0.23.0,>=0.22.1, but you have numba-cuda 0.30.2 which is incompatible.\r\n",
+      "hdbscan 0.8.42 requires scikit-learn>=1.6, but you have scikit-learn 1.5.0 which is incompatible.\u001b[0m\u001b[31m\r\n",
+      "\u001b[0m✅ Installation complete - using Kaggle's base packages\n"
+     ]
+    }
+   ],
+   "source": [
+    "# Run this once per Colab session.\n",
+    "# ============================================================\n",
+    "# KAGGLE: INSTALL ONLY WHAT YOU NEED (NO UPGRADES)\n",
+    "# ============================================================\n",
+    "# Install specific versions WITHOUT upgrading system packages\n",
+    "!pip install -q transformers==4.41.2 datasets==2.20.0 accelerate==0.31.0 peft==0.11.1\n",
+    "!pip install -q sentence-transformers==2.7.0\n",
+    "!pip install -q scikit-learn==1.5.0 xgboost==2.0.3\n",
+    "!pip install -q wandb\n",
+    "\n",
+    "# DO NOT upgrade numpy, torch, tensorflow, cuda, or RAPIDS packages\n",
+    "\n",
+    "print(\"✅ Installation complete - using Kaggle's base packages\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "id": "e687bf2c",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-07-21T17:10:56.314176Z",
+     "iopub.status.busy": "2026-07-21T17:10:56.313887Z",
+     "iopub.status.idle": "2026-07-21T17:11:03.458938Z",
+     "shell.execute_reply": "2026-07-21T17:11:03.458029Z"
+    },
+    "papermill": {
+     "duration": 7.154312,
+     "end_time": "2026-07-21T17:11:03.460586+00:00",
+     "exception": false,
+     "start_time": "2026-07-21T17:10:56.306274+00:00",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Using device: cuda\n"
+     ]
+    }
+   ],
+   "source": [
+    "import os, re, math, random, warnings\n",
+    "warnings.filterwarnings(\"ignore\")\n",
+    "\n",
+    "import numpy as np\n",
+    "import pandas as pd\n",
+    "\n",
+    "import torch\n",
+    "import torch.nn as nn\n",
+    "import torch.nn.functional as F\n",
+    "from torch.utils.data import Dataset, DataLoader\n",
+    "\n",
+    "from sklearn.feature_extraction.text import TfidfVectorizer\n",
+    "from sklearn.metrics.pairwise import cosine_similarity\n",
+    "from sklearn.model_selection import train_test_split\n",
+    "from sklearn.preprocessing import LabelEncoder\n",
+    "\n",
+    "SEED = 42\n",
+    "random.seed(SEED)\n",
+    "np.random.seed(SEED)\n",
+    "torch.manual_seed(SEED)\n",
+    "\n",
+    "DEVICE = torch.device(\"cuda\" if torch.cuda.is_available() else \"cpu\")\n",
+    "print(\"Using device:\", DEVICE)\n",
+    "\n",
+    "# this is now the errro , it is jsut a warning \n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "id": "2ebdb5ff",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-07-21T17:11:03.473002Z",
+     "iopub.status.busy": "2026-07-21T17:11:03.472268Z",
+     "iopub.status.idle": "2026-07-21T17:11:03.584969Z",
+     "shell.execute_reply": "2026-07-21T17:11:03.584150Z"
+    },
+    "papermill": {
+     "duration": 0.120586,
+     "end_time": "2026-07-21T17:11:03.586605+00:00",
+     "exception": false,
+     "start_time": "2026-07-21T17:11:03.466019+00:00",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "(2000, 8) (500, 7) (500, 2)\n"
+     ]
+    },
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>id</th>\n",
+       "      <th>prompt</th>\n",
+       "      <th>A</th>\n",
+       "      <th>B</th>\n",
+       "      <th>C</th>\n",
+       "      <th>D</th>\n",
+       "      <th>E</th>\n",
+       "      <th>answer</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>1</td>\n",
+       "      <td>Pick the best possible answer: What is Martin ...</td>\n",
+       "      <td>Martin Heidegger believes that humans exist wi...</td>\n",
+       "      <td>Martin Heidegger believes that humans do not e...</td>\n",
+       "      <td>Martin Heidegger does not believe in the exist...</td>\n",
+       "      <td>Martin Heidegger believes that the relationshi...</td>\n",
+       "      <td>Martin Heidegger believes that time is an illu...</td>\n",
+       "      <td>B</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>2</td>\n",
+       "      <td>What is accelerator-based light-ion fusion?</td>\n",
+       "      <td>Accelerator-based light-ion fusion is a techni...</td>\n",
+       "      <td>Accelerator-based light-ion fusion is a techni...</td>\n",
+       "      <td>Accelerator-based light-ion fusion is a techni...</td>\n",
+       "      <td>Accelerator-based light-ion fusion is a techni...</td>\n",
+       "      <td>Accelerator-based light-ion fusion is a techni...</td>\n",
+       "      <td>A</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>2</th>\n",
+       "      <td>3</td>\n",
+       "      <td>Determine the correct option: What is the term...</td>\n",
+       "      <td>Blueshifting</td>\n",
+       "      <td>Redshifting</td>\n",
+       "      <td>Reddening</td>\n",
+       "      <td>Whitening</td>\n",
+       "      <td>Yellowing</td>\n",
+       "      <td>C</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>3</th>\n",
+       "      <td>4</td>\n",
+       "      <td>Select the most accurate option: What is Marti...</td>\n",
+       "      <td>Martin Heidegger believes that humans exist wi...</td>\n",
+       "      <td>Martin Heidegger believes that humans do not e...</td>\n",
+       "      <td>Martin Heidegger does not believe in the exist...</td>\n",
+       "      <td>Martin Heidegger believes that the relationshi...</td>\n",
+       "      <td>Martin Heidegger believes that time is an illu...</td>\n",
+       "      <td>B</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>4</th>\n",
+       "      <td>5</td>\n",
+       "      <td>Identify the correct statement: What is the co...</td>\n",
+       "      <td>Simultaneity is relative, meaning that two eve...</td>\n",
+       "      <td>Simultaneity is relative, meaning that two eve...</td>\n",
+       "      <td>Simultaneity is absolute, meaning that two eve...</td>\n",
+       "      <td>Simultaneity is a concept that applies only to...</td>\n",
+       "      <td>Simultaneity is a concept that applies only to...</td>\n",
+       "      <td>A</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "   id                                             prompt  \\\n",
+       "0   1  Pick the best possible answer: What is Martin ...   \n",
+       "1   2        What is accelerator-based light-ion fusion?   \n",
+       "2   3  Determine the correct option: What is the term...   \n",
+       "3   4  Select the most accurate option: What is Marti...   \n",
+       "4   5  Identify the correct statement: What is the co...   \n",
+       "\n",
+       "                                                   A  \\\n",
+       "0  Martin Heidegger believes that humans exist wi...   \n",
+       "1  Accelerator-based light-ion fusion is a techni...   \n",
+       "2                                       Blueshifting   \n",
+       "3  Martin Heidegger believes that humans exist wi...   \n",
+       "4  Simultaneity is relative, meaning that two eve...   \n",
+       "\n",
+       "                                                   B  \\\n",
+       "0  Martin Heidegger believes that humans do not e...   \n",
+       "1  Accelerator-based light-ion fusion is a techni...   \n",
+       "2                                        Redshifting   \n",
+       "3  Martin Heidegger believes that humans do not e...   \n",
+       "4  Simultaneity is relative, meaning that two eve...   \n",
+       "\n",
+       "                                                   C  \\\n",
+       "0  Martin Heidegger does not believe in the exist...   \n",
+       "1  Accelerator-based light-ion fusion is a techni...   \n",
+       "2                                          Reddening   \n",
+       "3  Martin Heidegger does not believe in the exist...   \n",
+       "4  Simultaneity is absolute, meaning that two eve...   \n",
+       "\n",
+       "                                                   D  \\\n",
+       "0  Martin Heidegger believes that the relationshi...   \n",
+       "1  Accelerator-based light-ion fusion is a techni...   \n",
+       "2                                          Whitening   \n",
+       "3  Martin Heidegger believes that the relationshi...   \n",
+       "4  Simultaneity is a concept that applies only to...   \n",
+       "\n",
+       "                                                   E answer  \n",
+       "0  Martin Heidegger believes that time is an illu...      B  \n",
+       "1  Accelerator-based light-ion fusion is a techni...      A  \n",
+       "2                                          Yellowing      C  \n",
+       "3  Martin Heidegger believes that time is an illu...      B  \n",
+       "4  Simultaneity is a concept that applies only to...      A  "
+      ]
+     },
+     "execution_count": 5,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "# ---- Paths: adjust if your files live elsewhere (e.g. Google Drive) ----\n",
+    "DATA_DIR = \"/kaggle/input/competitions/smart-mcq-solver-challenge/\"   # change to \"/content/drive/MyDrive/mcq_challenge\" if using Drive\n",
+    "\n",
+    "train = pd.read_csv(os.path.join(DATA_DIR, \"train.csv\"))\n",
+    "test  = pd.read_csv(os.path.join(DATA_DIR, \"test.csv\"))\n",
+    "sample_submission = pd.read_csv(os.path.join(DATA_DIR, \"sample_submission.csv\"))\n",
+    "\n",
+    "OPTIONS = [\"A\", \"B\", \"C\", \"D\", \"E\"]\n",
+    "print(train.shape, test.shape, sample_submission.shape)\n",
+    "train.head()\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "4267203e",
+   "metadata": {
+    "papermill": {
+     "duration": 0.005469,
+     "end_time": "2026-07-21T17:11:03.598141+00:00",
+     "exception": false,
+     "start_time": "2026-07-21T17:11:03.592672+00:00",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "## 2. Light EDA"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "id": "1c151d16",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-07-21T17:11:03.610363Z",
+     "iopub.status.busy": "2026-07-21T17:11:03.609760Z",
+     "iopub.status.idle": "2026-07-21T17:11:03.631009Z",
+     "shell.execute_reply": "2026-07-21T17:11:03.630160Z"
+    },
+    "papermill": {
+     "duration": 0.028809,
+     "end_time": "2026-07-21T17:11:03.632551+00:00",
+     "exception": false,
+     "start_time": "2026-07-21T17:11:03.603742+00:00",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Missing values (train):\n",
+      " id        0\n",
+      "prompt    0\n",
+      "A         0\n",
+      "B         0\n",
+      "C         0\n",
+      "D         0\n",
+      "E         0\n",
+      "answer    0\n",
+      "dtype: int64\n",
+      "\n",
+      "Answer class balance:\n",
+      " answer\n",
+      "B    490\n",
+      "C    459\n",
+      "A    369\n",
+      "D    358\n",
+      "E    324\n",
+      "Name: count, dtype: int64\n",
+      "\n",
+      "Prompt length stats (chars):\n",
+      " count    2000.000000\n",
+      "mean      117.669500\n",
+      "std        44.408674\n",
+      "min        19.000000\n",
+      "25%        87.750000\n",
+      "50%       111.000000\n",
+      "75%       141.000000\n",
+      "max       337.000000\n",
+      "Name: prompt, dtype: float64\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(\"Missing values (train):\\n\", train.isnull().sum())\n",
+    "print(\"\\nAnswer class balance:\\n\", train[\"answer\"].value_counts())\n",
+    "print(\"\\nPrompt length stats (chars):\\n\", train[\"prompt\"].str.len().describe())"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "2bcc987f",
+   "metadata": {
+    "papermill": {
+     "duration": 0.005608,
+     "end_time": "2026-07-21T17:11:03.643457+00:00",
+     "exception": false,
+     "start_time": "2026-07-21T17:11:03.637849+00:00",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "source": [
+    "## 3. MAP@3 metric\n",
+    "\n",
+    "For each question, if the true label appears at rank *k* (1-indexed) among our top-3 predictions,\n",
+    "the score for that question is `1/k`; if it doesn't appear in the top 3, the score is `0`.\n",
+    "The final metric is the mean over all questions.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "id": "0ae6b089",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2026-07-21T17:11:03.655739Z",
+     "iopub.status.busy": "2026-07-21T17:11:03.655519Z",
+     "iopub.status.idle": "2026-07-21T17:11:03.661475Z",
+     "shell.execute_reply": "2026-07-21T17:11:03.660725Z"
+    },
+    "papermill": {
+     "duration": 0.013869,
+     "end_time": "2026-07-21T17:11:03.663039+00:00",
+     "exception": false,
+     "start_time": "2026-07-21T17:11:03.649170+00:00",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "def map_at_3(y_true, top3_preds):\n",
+    "    \"\"\"\n",
+    "    y_true      : list/array of true labels, e.g. ['A','C',...]\n",
+    "    top3_preds  : list of lists, each an ordered top-3 prediction e.g. [['A','B','C'], ...]\n",
+    "    \"\"\"\n",
+    "    scores = []\n",
+    "    for true_label, preds in zip(y_true, top3_preds):\n",
+    "        score = 0.0\n",
+    "        for rank, p in enumerate(preds[:3], start=1):\n",
+    "            if p == true_label:\n",
+    "                score = 1.0 / rank\n",
+    "                break\n",
+    "        scores.append(score)\n",
+    "    return float(np.mean(scores))\n",
+    "\n",
+    "def probs_to_top3(prob_matrix, classes=OPTIONS):\n",
+    "    \"\"\"prob_matrix: (n_samples, 5) array of class probabilities in the order of `classes`.\"\"\"\n",
+    "    order = np.argsort(-prob_matrix, axis=1)  # descending\n",
+    "    top3 = [[classes[idx] for idx in row[:3]] for row in order]\n",
+    "    return top3\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kaggle": {
+   "accelerator": "none",
+   "dataSources": [],
+   "dockerImageVersionId": 28755,
+   "isGpuEnabled": false,
+   "isInternetEnabled": false,
+   "language": "python",
+   "sourceType": "notebook"
+  },
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.12.13"
+  },
+  "papermill": {
+   "default_parameters": {},
+   "duration": 62.164674,
+   "end_time": "2026-07-21T17:11:06.749119+00:00",
+   "environment_variables": {},
+   "exception": null,
+   "input_path": "__notebook__.ipynb",
+   "output_path": "__notebook__.ipynb",
+   "parameters": {},
+   "start_time": "2026-07-21T17:10:04.584445+00:00",
+   "version": "2.7.0"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
